@@ -20,6 +20,7 @@ from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
                            SequenceGroupMetadataDelta, SequenceStage,
                            SequenceStatus)
 from vllm.utils import Device, PyObjectCache
+from vllm.core.block.block_table import BlockTable
 
 logger = init_logger(__name__)
 
@@ -2059,3 +2060,11 @@ class Scheduler:
                              prefill_slot_budget)
 
         return num_new_tokens
+
+    def get_sequence_group(self, request_id: str) -> Optional[SequenceGroup]:
+        """Gets the SequenceGroup for the given request_id if it exists."""
+        for state_queue in [self.waiting, self.running, self.swapped]:
+            for seq_group in state_queue:
+                if seq_group.request_id == request_id:
+                    return seq_group
+        return None

@@ -49,7 +49,7 @@ from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.sequence import (ExecuteModelRequest, ParallelSampleSequenceGroup,
                            PoolingSequenceGroupOutput, Sequence, SequenceGroup,
                            SequenceGroupBase, SequenceGroupMetadata,
-                           SequenceGroupOutput, SequenceStatus)
+                           SequenceGroupOutput, SequenceStatus, SequenceData)
 from vllm.tracing import (SpanAttributes, SpanKind, extract_trace_context,
                           init_tracer)
 from vllm.transformers_utils.detokenizer import Detokenizer
@@ -62,6 +62,9 @@ from vllm.utils import (Counter, Device, deprecate_kwargs,
                         resolve_obj_by_qualname, weak_bind)
 from vllm.version import __version__ as VLLM_VERSION
 from vllm.worker.model_runner_base import InputProcessingError
+from vllm.worker.worker import Worker # Assuming Worker class is needed for RPC calls
+import pickle
+from vllm.core.block.block_table import BlockTable # Add if not present
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
@@ -2160,6 +2163,202 @@ class LLMEngine:
                        kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
         return self.model_executor.collective_rpc(method, timeout, args,
                                                   kwargs)
+
+    def initiate_kv_export(self, request_id: str) -> Optional[bytes]:
+        """Exports the state of a sequence group, including KV cache, for transfer.
+
+        Args:
+            request_id: The ID of the request/sequence group to export.
+
+        Returns:
+            Serialized bytes containing metadata and KV cache data, or None if failed.
+        """
+        logger.info(f"Initiating KV cache export for request ID: {request_id}")
+        
+        # Assuming pipeline parallel size is 1 for now
+        virtual_engine_id = 0 
+        scheduler = self.scheduler[virtual_engine_id]
+
+        # 1. Get SequenceGroup
+        seq_group = None
+        try:
+            seq_group = scheduler.get_sequence_group(request_id)
+            if seq_group is None:
+                logger.warning(f"Request ID {request_id} not found in scheduler queues for export.")
+                return None
+            logger.info(f"Found SequenceGroup for export: {request_id}. Status: {seq_group.get_status()}")
+        except Exception as e:
+            logger.exception(f"Error getting SequenceGroup for export ({request_id}): {e}")
+            return None
+
+        # 2. Get BlockTable (directly from BlockManager via Scheduler)
+        block_tables = []
+        try:
+            # Ensure block_manager attribute exists on scheduler
+            if not hasattr(scheduler, 'block_manager'):
+                 logger.error("Scheduler does not have a 'block_manager' attribute.")
+                 return None
+            for seq in seq_group.seqs:
+                block_tables.append(scheduler.block_manager.get_block_table(seq))
+                logger.info(f"Retrieved block table for {request_id} directly from block_manager.")
+        except AttributeError as e:
+             logger.exception(f"BlockManager instance ({type(scheduler.block_manager).__name__}) on scheduler does not have expected method 'get_block_table': {e}")
+             return None
+        except KeyError as e:
+             logger.exception(f"Error retrieving block table for {request_id} from BlockManager: {e}")
+             return None
+        except Exception as e:
+            logger.exception(f"Unexpected error getting BlockTable for {request_id} from block_manager: {e}")
+            return None
+
+        # 3. Call worker to export KV cache
+        kv_caches_for_group = []
+        try:
+            for block_table in block_tables:
+                kv_cache_for_seq = self.model_executor.collective_rpc(
+                    "export_blocks_to_cpu_buffer", 
+                    args=(block_table,)
+                )
+                kv_caches_for_group.append(kv_cache_for_seq)
+            logger.info(f"Successfully received KV cache data from worker for {request_id}.")
+        except Exception as e:
+            logger.exception(f"RPC call to worker's execute_export_kv_cache failed for {request_id}: {e}")
+            return None
+
+        # 5. Serialize data
+        try:
+            payload = {
+                'metadata': seq_group,
+                'kv_cache': kv_caches_for_group
+            }
+            serialized_data = pickle.dumps(payload)
+            logger.info(f"Serialized payload for {request_id}. Size: {len(serialized_data)} bytes")
+            return serialized_data
+        except Exception as e:
+            logger.exception(f"Failed to serialize payload for {request_id}: {e}")
+            return None
+
+    def initiate_kv_import(self, serialized_data: bytes) -> bool:
+        """Imports SequenceGroup object, adds it to scheduler, and prepares for KV import.
+
+        Assumes serialized_data contains a pickled dictionary with:
+         - 'seq_group_obj': The pickled SequenceGroup object.
+         - 'kv_tensor_payload': The separately serialized KV tensor data.
+
+        Args:
+            serialized_data: The bytes received from the export process.
+
+        Returns:
+            True if the SequenceGroup was successfully added to the scheduler, False otherwise.
+            Note: KV cache data loading and block table updates happen later.
+        """
+        logger.info("Initiating KV cache import process.")
+        request_id_for_cleanup = None # In case we fail mid-process
+
+        # 1. Deserialize payload containing the pickled SequenceGroup and KV tensors
+        try:
+            payload = pickle.loads(serialized_data)
+            if not isinstance(payload, dict):
+                 raise TypeError("Deserialized payload is not a dictionary.")
+
+            # Unpickle the SequenceGroup object itself
+            pickled_seq_group = payload.get('metadata')
+            if pickled_seq_group is None:
+                raise KeyError("'metadata' not found in payload.")
+            seq_group = pickle.loads(pickled_seq_group)
+            if not isinstance(seq_group, SequenceGroup):
+                 raise TypeError("Deserialized 'seq_group' is not a SequenceGroup instance.")
+
+            # Keep the serialized KV tensor payload for later processing
+            kv_cache_seq_group = payload.get('kv_cache')
+            if kv_cache_seq_group is None:
+                 raise KeyError("'kv_cache_seq_group' not found in payload.")
+
+            request_id_for_cleanup = seq_group.request_id
+            logger.info(f"Deserialized payload for request {request_id_for_cleanup}. Unpickled SequenceGroup object.")
+
+        except pickle.UnpicklingError as e:
+            logger.exception(f"Failed to deserialize KV cache import payload (pickle error): {e}")
+            return False
+        except (KeyError, TypeError) as e:
+            logger.exception(f"Error processing deserialized payload structure: {e}")
+            return False
+        except Exception as e:
+            logger.exception(f"Failed to deserialize or validate KV cache import payload: {e}")
+            return False
+        
+        # remove block tables from seq_group
+        for seq in seq_group.seqs:
+            seq.block_table = []
+
+        # 2. Store the unpickled SequenceGroup and KV tensor payload for later processing
+        #    This allows the scheduler to allocate blocks first. The actual KV data
+        #    loading and block table overwrite will happen in a subsequent step.
+        try:
+            if not hasattr(self, '_pending_kv_imports'):
+                self._pending_kv_imports = {}
+            if request_id_for_cleanup in self._pending_kv_imports:
+                 logger.warning(f"Request ID {request_id_for_cleanup} already present in pending imports. Overwriting.")
+
+            # Store the unpickled object and the tensor payload.
+            # The object currently holds the *source* machine's block tables.
+            self._pending_kv_imports[request_id_for_cleanup] = (seq_group_obj, kv_tensor_payload)
+            logger.info(f"Stored unpickled SequenceGroup {request_id_for_cleanup} and KV tensor payload. Marked for final import step.")
+
+        except Exception as e:
+            logger.exception(f"Error storing pending import data for {request_id_for_cleanup}: {e}")
+            # Clean up if partially added
+            if hasattr(self, '_pending_kv_imports') and request_id_for_cleanup in self._pending_kv_imports:
+                del self._pending_kv_imports[request_id_for_cleanup]
+            return False
+
+        # 3. Add the unpickled SequenceGroup to the scheduler
+        #    Note: It still has the OLD block tables at this point. The scheduler
+        #    needs it to know about the request and allocate new blocks.
+        try:
+            # Assuming non-parallel processing for simplicity, use virtual_engine_id 0
+            virtual_engine_id = 0
+            if virtual_engine_id not in self.scheduler:
+                 logger.error(f"Scheduler for virtual engine {virtual_engine_id} not found.")
+                 raise ValueError(f"Invalid virtual engine ID {virtual_engine_id}")
+
+            scheduler = self.scheduler[virtual_engine_id]
+            # Add the group. The scheduler will eventually allocate blocks for it.
+            scheduler.add_seq_group(seq_group)
+            logger.info(f"Added unpickled SequenceGroup {request_id_for_cleanup} to scheduler. "
+                        f"KV data loading and block table update will occur post-allocation.")
+
+        except Exception as e:
+            logger.exception(f"Error adding SequenceGroup {request_id_for_cleanup} to scheduler: {e}")
+            # Clean up the stored pending data if adding to scheduler fails
+            if hasattr(self, '_pending_kv_imports') and request_id_for_cleanup in self._pending_kv_imports:
+                logger.warning(f"Cleaning up pending import data for {request_id_for_cleanup} due to scheduler error.")
+                del self._pending_kv_imports[request_id_for_cleanup]
+            return False
+    
+        
+
+    def cleanup_exported_request(self, request_id: str) -> bool:
+        """Cleans up the state of an exported request on the source server.
+        """
+        logger.info(f"Initiating cleanup for exported request ID: {request_id}")
+        virtual_engine_id = 0 # Assuming non-PP
+        scheduler = self.scheduler[virtual_engine_id]
+        try:
+            scheduler.abort_seq_group(request_id, self.seq_id_to_seq_group)
+            logger.info(f"Successfully called abort_seq_group for {request_id}.")
+            # Clean up internal tracking
+            keys_to_remove = [k for k, v in self.seq_id_to_seq_group.items() if v.group_id == request_id]
+            if not keys_to_remove and request_id in self.seq_id_to_seq_group:
+                 keys_to_remove = [request_id]
+            for key in keys_to_remove:
+                 if key in self.seq_id_to_seq_group:
+                    del self.seq_id_to_seq_group[key]
+                    logger.debug(f"Removed {key} from seq_id_to_seq_group mapping during cleanup.")
+            return True
+        except Exception as e:
+            logger.exception(f"Error during cleanup (abort_seq_group) for {request_id}: {e}")
+            return False
 
 
 if envs.is_set("VLLM_USE_V1") and envs.VLLM_USE_V1:

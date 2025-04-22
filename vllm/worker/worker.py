@@ -31,6 +31,8 @@ from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
 from vllm.worker.pooling_model_runner import PoolingModelRunner
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase, WorkerBase,
                                      WorkerInput)
+# Import BlockTable if needed for type hinting    
+from vllm.core.block.block_table import BlockTable
 
 logger = init_logger(__name__)
 
@@ -490,6 +492,61 @@ class Worker(LocalOrDistributedWorkerBase):
         return CacheEngine.get_cache_block_size(self.cache_config,
                                                 self.model_config,
                                                 self.parallel_config)
+
+    @torch.inference_mode()
+    def execute_export_kv_cache(
+        self, block_table: BlockTable
+    ) -> Dict[int, List[torch.Tensor]]:
+        """Executes the export of KV cache blocks defined by the block_table.
+
+        Args:
+            block_table: The block table mapping logical indices to physical blocks
+                         for the sequence group to export.
+
+        Returns:
+            A dictionary mapping logical block index to a list of CPU tensors
+            (one combined K/V tensor per layer).
+            Returns an empty dictionary if the export fails or cache is missing.
+        """
+        # Assuming non-pipelined setup, use cache_engine[0]
+        # Add checks if pipeline parallelism > 1
+        if not hasattr(self, 'cache_engine') or not self.cache_engine:
+            logger.error("CacheEngine not initialized on worker.")
+            return {}
+        try:
+            # Note: Assumes cache_engine[0] is the correct one for non-PP case
+            cpu_buffer = self.cache_engine[0].export_blocks_to_cpu_buffer(block_table)
+            return cpu_buffer
+        except Exception as e:
+            logger.exception(f"Error during KV cache export on worker: {e}")
+            return {}
+
+    @torch.inference_mode()
+    def execute_import_kv_cache(
+        self,
+        cpu_buffer: Dict[int, List[torch.Tensor]],
+        block_table: BlockTable
+    ) -> bool:
+        """Executes the import of KV cache data from a CPU buffer into target blocks.
+
+        Args:
+            cpu_buffer: The dictionary containing the KV cache data (keyed by logical index).
+            block_table: The target block table with allocated physical GPU blocks.
+
+        Returns:
+            True if the import was successful, False otherwise.
+        """
+        # Assuming non-pipelined setup, use cache_engine[0]
+        if not hasattr(self, 'cache_engine') or not self.cache_engine:
+            logger.error("CacheEngine not initialized on worker.")
+            return False
+        try:
+            # Note: Assumes cache_engine[0] is the correct one for non-PP case
+            self.cache_engine[0].import_cpu_buffer_to_gpu(cpu_buffer, block_table)
+            return True
+        except Exception as e:
+            logger.exception(f"Error during KV cache import on worker: {e}")
+            return False
 
 
 def init_worker_distributed_environment(
