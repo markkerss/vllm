@@ -21,6 +21,7 @@ from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
                            SequenceStatus)
 from vllm.utils import Device, PyObjectCache
 from vllm.core.block.block_table import BlockTable
+from collections import defaultdict
 
 logger = init_logger(__name__)
 
@@ -279,6 +280,10 @@ class SchedulerSwappedInOutputs:
             infeasible_seq_groups=[],
         )
 
+class PendingAction(enum.Enum):
+  DECODE = enum.auto()
+  ADD_CHUNK = enum.auto()
+  EXPORT = enum.auto()
 
 @dataclass
 class SchedulerPrefillOutputs:
@@ -474,6 +479,10 @@ class Scheduler:
         # Sequence groups in the SWAPPED state.
         # Contain decode requests that are swapped out.
         self.swapped: Deque[SequenceGroup] = deque()
+
+        self.suspended: Dict[str, SequenceGroup] = {}
+        self.add_chunk_requests: Dict[str, List[List[int]]] = defaultdict(list)
+        self.imported_kv_caches: Dict[str, bytes] = {}
         # Sequence groups finished requests ids since last step iteration.
         # It lets the model know that any state associated with these requests
         # can and must be released after the current step.
@@ -813,6 +822,9 @@ class Scheduler:
                     budget.add_num_seqs(seq_group.request_id, num_running_seqs)
                 if curr_loras is not None and seq_group.lora_int_id > 0:
                     curr_loras.add(seq_group.lora_int_id)
+            if seq_group.is_finished():
+                if seq_group.waiting_for_decode_trigger:
+                    self.suspended[seq_group.request_id] = seq_group
 
         self._scheduler_running_outputs_cache[self.next_cache_id].reset()
         self._scheduled_seq_group_cache[self.next_cache_id].reset()
@@ -1080,6 +1092,55 @@ class Scheduler:
             seq_group = waiting_queue[0]
 
             waiting_seqs = seq_group.get_seqs(status=SequenceStatus.WAITING)
+            waiting_seq_ids = {s.seq_id for s in waiting_seqs}
+            has_allocated_table = any(seq_id in self.block_manager.block_tables for seq_id in waiting_seq_ids)
+            is_imported = (not has_allocated_table) and any(s.get_len() > 0 for s in waiting_seqs)
+
+            if is_imported:
+                can_allocate = self.block_manager.can_allocate(seq_group, num_lookahead_slots=0)
+                if can_allocate == AllocStatus.LATER:
+                    logger.debug(f"Cannot allocate blocks for imported group {seq_group.request_id} yet. Waiting.")
+                    break # Stop processing waiting queue for now
+                elif can_allocate == AllocStatus.NEVER:
+                    logger.error(f"Cannot ever allocate blocks for imported group {seq_group.request_id}. Ignoring.")
+                    for seq in waiting_seqs: seq.status = SequenceStatus.FINISHED_IGNORED
+                    ignored_seq_groups.append(seq_group)
+                    waiting_queue.popleft()
+                    continue 
+
+                num_new_seqs = seq_group.get_max_num_running_seqs() # get number of sequences to allocate
+                if not budget.can_schedule(num_new_tokens=0, num_new_seqs=num_new_seqs):
+                    logger.debug(f"Sequence budget limit reached, cannot schedule imported group {seq_group.request_id}. Waiting.")
+                    break # Stop processing waiting queue
+
+                # --- Allocation & Scheduling for Imported Group ---
+                logger.info(f"Scheduling imported group {seq_group.request_id} for allocation.")
+                waiting_queue.popleft()
+                try:
+                    # Call the modified allocate which handles imported case internally
+                    self.block_manager.allocate(seq_group)
+                except Exception as e: # Catch potential allocation errors
+                    logger.error(f"Block allocation failed for imported {seq_group.request_id}: {e}", exc_info=True)
+                    # Re-queue the group to try again later. Handle potential partial cleanup if needed.
+                    waiting_queue.appendleft(seq_group)
+                    continue # Move to next group
+
+                if seq_group.request_id in self.imported_kv_caches and seq_group.request_id in self.block_manager.block_tables:
+                    logger.info(f"Importing KV cache for imported group {seq_group.request_id}.")
+                    self.model_executor.collective_rpc(
+                        "import_blocks_from_cpu_buffer", 
+                        args=(self.imported_kv_caches[seq_group.request_id], self.block_manager.block_tables[seq_group.request_id])
+                    )
+                else:
+                    raise ValueError(f"No KV cache found for imported group {seq_group.request_id}.")
+
+                for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
+                    seq.status = SequenceStatus.RUNNING
+                
+                budget.add_num_seqs(seq_group.request_id, num_new_seqs)
+                seq_groups.append(ScheduledSequenceGroup(seq_group=seq_group, token_chunk_size=0))
+                continue
+            
             assert len(waiting_seqs) == 1, (
                 "Waiting sequence group should have only one prompt "
                 "sequence.")
@@ -1242,6 +1303,22 @@ class Scheduler:
         prefills = SchedulerPrefillOutputs.create_empty()
         running_scheduled = SchedulerRunningOutputs.create_empty()
         swapped_in = SchedulerSwappedInOutputs.create_empty()
+
+        for seq_group_id, seq_group in self.suspended.items():
+          if seq_group.pending_action == PendingAction.DECODE:
+            seq_group.state = SequenceStage.DECODE
+            seq_group.waiting_for_decode_trigger = False
+            seq_group.sampling_params.max_tokens = 4096
+          elif seq_group.pending_action == PendingAction.ADD_CHUNK:
+            prompt_tokens = self.add_chunk_requests[seq_group_id]
+            for prompt_token in prompt_tokens:
+              for seq in seq_group.seqs:
+                seq.data.extend(prompt_token)
+            seq_group.state = SequenceStage.PREFILL
+          # elif seq_group.pending_action == PendingAction.EXPORT:
+          #     self.run_export(seq_group_id)
+          seq_group.pending_action = None
+          del self.suspended[seq_group_id]
 
         # If any requests are swapped, prioritized swapped requests.
         if not self.swapped:
@@ -2068,3 +2145,23 @@ class Scheduler:
                 if seq_group.request_id == request_id:
                     return seq_group
         return None
+    
+    def run_decode(self, request_id: str):
+      if request_id not in self.suspended:
+        raise ValueError(f"Request {request_id} not found in suspended")
+      seq_group = self.suspended[request_id]
+      seq_group.pending_action = PendingAction.DECODE
+
+    def run_add_chunk(self, request_id: str, prompt_tokens: List[int]):
+      if request_id not in self.suspended:
+        raise ValueError(f"Request {request_id} not found in suspended")
+      seq_group = self.suspended[request_id]
+      seq_group.pending_action = PendingAction.ADD_CHUNK
+      self.add_chunk_requests[request_id].append(prompt_tokens)
+    
+    def run_export(self, request_id: str):
+      if request_id not in self.suspended:
+        raise ValueError(f"Request {request_id} not found in suspended")
+      seq_group = self.suspended[request_id]
+      seq_group.pending_action = PendingAction.EXPORT
+      

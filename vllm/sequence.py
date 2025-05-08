@@ -417,6 +417,7 @@ class Sequence:
         eos_token_id: Optional[int] = None,
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        waiting_for_decode_trigger: bool = False,
     ) -> None:
         self.seq_id = seq_id
         self.inputs = SingletonInputsAdapter(inputs)
@@ -441,6 +442,7 @@ class Sequence:
         self.read_offset = 0
         # Input + output tokens
         self.tokens: Optional[list[str]] = None
+        self.waiting_for_decode_trigger = waiting_for_decode_trigger
 
     @property
     def n_blocks(self) -> int:
@@ -629,6 +631,11 @@ class SequenceGroupState(msgspec.Struct,
     def remaining_steps(self) -> int:
         return self.num_steps - self.current_step
 
+class PendingAction(enum.IntEnum):
+    DECODE = 0
+    EXPORT = 1
+    ADD_CHUNK = 2
+
 
 class SequenceGroup:
     """A group of sequences that are generated from the same prompt.
@@ -665,7 +672,8 @@ class SequenceGroup:
                  trace_headers: Optional[Mapping[str, str]] = None,
                  prompt_adapter_request: Optional[PromptAdapterRequest] = None,
                  priority: int = 0,
-                 draft_size: int = 1) -> None:
+                 draft_size: int = 1,
+                 waiting_for_decode_trigger: bool = False) -> None:
         self.request_id = request_id
         self.seqs = seqs
         self.first_seq = seqs[0]
@@ -693,6 +701,8 @@ class SequenceGroup:
         self.priority = priority
 
         self.cached_request_output = None
+        self.waiting_for_decode_trigger = waiting_for_decode_trigger
+        self.pending_action = None
 
     @property
     def prompt(self) -> Optional[str]:

@@ -8,7 +8,7 @@ import re
 import time
 from dataclasses import dataclass
 from functools import partial
-from typing import BinaryIO, Generator, Optional, Tuple, Type, Union
+from typing import BinaryIO, Generator, Optional, Tuple, Type, Union, TYPE_CHECKING
 
 import torch
 from torch import nn
@@ -17,7 +17,8 @@ from transformers import PretrainedConfig
 import vllm.envs as envs
 from vllm.config import ModelConfig, ParallelConfig, set_current_vllm_config
 from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.llm_engine import LLMEngine
+if TYPE_CHECKING:
+    from vllm.engine.llm_engine import LLMEngine
 from vllm.logger import init_logger
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)

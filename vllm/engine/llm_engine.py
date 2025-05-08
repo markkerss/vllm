@@ -62,7 +62,7 @@ from vllm.utils import (Counter, Device, deprecate_kwargs,
                         resolve_obj_by_qualname, weak_bind)
 from vllm.version import __version__ as VLLM_VERSION
 from vllm.worker.model_runner_base import InputProcessingError
-from vllm.worker.worker import Worker # Assuming Worker class is needed for RPC calls
+# from vllm.worker.worker import Worker # Assuming Worker class is needed for RPC calls
 import pickle
 from vllm.core.block.block_table import BlockTable # Add if not present
 
@@ -590,6 +590,7 @@ class LLMEngine:
         prompt_adapter_request: Optional[PromptAdapterRequest],
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
+        waiting_for_decode_trigger: bool = False,
     ) -> Optional[SequenceGroup]:
         """Add a processed request to the engine's request pool.
         return the created sequence group.
@@ -605,6 +606,7 @@ class LLMEngine:
                 trace_headers=trace_headers,
                 prompt_adapter_request=prompt_adapter_request,
                 priority=priority,
+                waiting_for_decode_trigger=waiting_for_decode_trigger,
             )
             return None
 
@@ -617,11 +619,13 @@ class LLMEngine:
         encoder_inputs, decoder_inputs = split_enc_dec_inputs(processed_inputs)
 
         seq = Sequence(seq_id, decoder_inputs, block_size, eos_token_id,
-                       lora_request, prompt_adapter_request)
+                       lora_request, prompt_adapter_request,
+                       waiting_for_decode_trigger=waiting_for_decode_trigger)
 
         encoder_seq = (None if encoder_inputs is None else Sequence(
             seq_id, encoder_inputs, block_size, eos_token_id, lora_request,
-            prompt_adapter_request))
+            prompt_adapter_request,
+            waiting_for_decode_trigger=waiting_for_decode_trigger))
 
         # Create a SequenceGroup based on SamplingParams or PoolingParams
         if isinstance(params, SamplingParams):
@@ -634,7 +638,8 @@ class LLMEngine:
                 trace_headers=trace_headers,
                 prompt_adapter_request=prompt_adapter_request,
                 encoder_seq=encoder_seq,
-                priority=priority)
+                priority=priority,
+                waiting_for_decode_trigger=waiting_for_decode_trigger)
         elif isinstance(params, PoolingParams):
             seq_group = self._create_sequence_group_with_pooling(
                 request_id,
@@ -644,7 +649,8 @@ class LLMEngine:
                 lora_request=lora_request,
                 prompt_adapter_request=prompt_adapter_request,
                 encoder_seq=encoder_seq,
-                priority=priority)
+                priority=priority,
+                waiting_for_decode_trigger=waiting_for_decode_trigger)
         else:
             raise ValueError(
                 "Either SamplingParams or PoolingParams must be provided.")
@@ -706,6 +712,7 @@ class LLMEngine:
             trace_headers: Optional[Mapping[str, str]] = None,
             prompt_adapter_request: Optional[PromptAdapterRequest] = None,
             priority: int = 0,
+            waiting_for_decode_trigger: bool = False,
             *,
             inputs: Optional[PromptType] = None,  # DEPRECATED
     ) -> None:
@@ -797,6 +804,7 @@ class LLMEngine:
             prompt_adapter_request=prompt_adapter_request,
             trace_headers=trace_headers,
             priority=priority,
+            waiting_for_decode_trigger=waiting_for_decode_trigger,
         )
 
     def _validate_token_prompt(self, prompt: PromptType,
@@ -831,6 +839,7 @@ class LLMEngine:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         encoder_seq: Optional[Sequence] = None,
         priority: int = 0,
+        waiting_for_decode_trigger: bool = False,
     ) -> SequenceGroup:
         """Creates a SequenceGroup with SamplingParams."""
         max_logprobs = self.get_model_config().max_logprobs
@@ -866,7 +875,8 @@ class LLMEngine:
             prompt_adapter_request=prompt_adapter_request,
             encoder_seq=encoder_seq,
             priority=priority,
-            draft_size=draft_size)
+            draft_size=draft_size,
+            waiting_for_decode_trigger=waiting_for_decode_trigger)
 
         return seq_group
 
@@ -880,6 +890,7 @@ class LLMEngine:
         prompt_adapter_request: Optional[PromptAdapterRequest],
         encoder_seq: Optional[Sequence] = None,
         priority: int = 0,
+        waiting_for_decode_trigger: bool = False,
     ) -> SequenceGroup:
         """Creates a SequenceGroup with PoolingParams."""
         # Defensive copy of PoolingParams, which are used by the pooler
@@ -893,7 +904,8 @@ class LLMEngine:
             pooling_params=pooling_params,
             prompt_adapter_request=prompt_adapter_request,
             encoder_seq=encoder_seq,
-            priority=priority)
+            priority=priority,
+            waiting_for_decode_trigger=waiting_for_decode_trigger)
         return seq_group
 
     def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:
@@ -1147,6 +1159,9 @@ class LLMEngine:
 
             if seq_group.is_finished():
                 finished_now.append(i)
+                if seq_group.waiting_for_decode_trigger:
+                    for scheduler in self.scheduler:
+                        scheduler.add_to_suspend(seq_group)
 
         # Generate outputs for the requests that finished this iteration
         for i in finished_now:
@@ -2164,6 +2179,25 @@ class LLMEngine:
         return self.model_executor.collective_rpc(method, timeout, args,
                                                   kwargs)
 
+    def run_first_add_chunk(self, request_id: str, prompt: str):
+        self.add_request(request_id, prompt, params=SamplingParams(max_tokens=0), waiting_for_decode_trigger=True)
+    
+    def run_decode(self, request_id: str):
+        scheduler = self.llm_engine.scheduler[0]
+        if not scheduler.run_decode(request_id):
+            raise ValueError(f"Request {request_id} not found in scheduler")
+        
+    def run_add_chunk(self, request_id:str, prompt: str):
+        scheduler = self.llm_engine.scheduler[0]
+        prompt_tokens = self.tokenizer.encode(prompt)
+        if not scheduler.run_add_chunk(request_id, prompt_tokens):
+            raise ValueError(f"Request {request_id} not found in scheduler")
+        
+    def run_export(self, request_id:str):
+        scheduler = self.llm_engine.scheduler[0]
+        if not scheduler.run_export(request_id):
+            raise ValueError(f"Request {request_id} not found in scheduler")
+    
     def initiate_kv_export(self, request_id: str) -> Optional[bytes]:
         """Exports the state of a sequence group, including KV cache, for transfer.
 
@@ -2265,15 +2299,13 @@ class LLMEngine:
             pickled_seq_group = payload.get('metadata')
             if pickled_seq_group is None:
                 raise KeyError("'metadata' not found in payload.")
-            seq_group = pickle.loads(pickled_seq_group)
-            if not isinstance(seq_group, SequenceGroup):
-                 raise TypeError("Deserialized 'seq_group' is not a SequenceGroup instance.")
+            seq_group: SequenceGroup = pickle.loads(pickled_seq_group)
 
             # Keep the serialized KV tensor payload for later processing
             kv_cache_seq_group = payload.get('kv_cache')
             if kv_cache_seq_group is None:
                  raise KeyError("'kv_cache_seq_group' not found in payload.")
-
+            self.scheduler._add_imported_kv_cache(seq_group.request_id, kv_cache_seq_group)
             request_id_for_cleanup = seq_group.request_id
             logger.info(f"Deserialized payload for request {request_id_for_cleanup}. Unpickled SequenceGroup object.")
 
@@ -2285,31 +2317,6 @@ class LLMEngine:
             return False
         except Exception as e:
             logger.exception(f"Failed to deserialize or validate KV cache import payload: {e}")
-            return False
-        
-        # remove block tables from seq_group
-        for seq in seq_group.seqs:
-            seq.block_table = []
-
-        # 2. Store the unpickled SequenceGroup and KV tensor payload for later processing
-        #    This allows the scheduler to allocate blocks first. The actual KV data
-        #    loading and block table overwrite will happen in a subsequent step.
-        try:
-            if not hasattr(self, '_pending_kv_imports'):
-                self._pending_kv_imports = {}
-            if request_id_for_cleanup in self._pending_kv_imports:
-                 logger.warning(f"Request ID {request_id_for_cleanup} already present in pending imports. Overwriting.")
-
-            # Store the unpickled object and the tensor payload.
-            # The object currently holds the *source* machine's block tables.
-            self._pending_kv_imports[request_id_for_cleanup] = (seq_group_obj, kv_tensor_payload)
-            logger.info(f"Stored unpickled SequenceGroup {request_id_for_cleanup} and KV tensor payload. Marked for final import step.")
-
-        except Exception as e:
-            logger.exception(f"Error storing pending import data for {request_id_for_cleanup}: {e}")
-            # Clean up if partially added
-            if hasattr(self, '_pending_kv_imports') and request_id_for_cleanup in self._pending_kv_imports:
-                del self._pending_kv_imports[request_id_for_cleanup]
             return False
 
         # 3. Add the unpickled SequenceGroup to the scheduler
@@ -2330,10 +2337,6 @@ class LLMEngine:
 
         except Exception as e:
             logger.exception(f"Error adding SequenceGroup {request_id_for_cleanup} to scheduler: {e}")
-            # Clean up the stored pending data if adding to scheduler fails
-            if hasattr(self, '_pending_kv_imports') and request_id_for_cleanup in self._pending_kv_imports:
-                logger.warning(f"Cleaning up pending import data for {request_id_for_cleanup} due to scheduler error.")
-                del self._pending_kv_imports[request_id_for_cleanup]
             return False
     
         

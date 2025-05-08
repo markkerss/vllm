@@ -13,7 +13,7 @@ from vllm.core.block.utils import check_no_caching_or_swa_for_blockmgr_encdec
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
-
+import math
 SeqId = int
 EncoderSeqId = str
 
@@ -168,40 +168,69 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         waiting_seqs = seq_group.get_seqs(status=SequenceStatus.WAITING)
         assert not (set(seq.seq_id for seq in waiting_seqs)
                     & self.block_tables.keys()), "block table already exists"
-
+        has_allocated_table = any(s.seq_id in self.block_tables for s in waiting_seqs)
+        is_imported = any(s.get_len() > 0 for s in waiting_seqs) and (not has_allocated_table)
         # NOTE: Here we assume that all sequences in the group have the same
         # prompt.
         seq = waiting_seqs[0]
-        block_table: BlockTable = self._allocate_sequence(seq)
-        self.block_tables[seq.seq_id] = block_table
 
-        # Track seq
-        self._last_access_blocks_tracker.add_seq(seq.seq_id)
-
-        # Assign the block table for each sequence.
-        for seq in waiting_seqs[1:]:
-            self.block_tables[seq.seq_id] = block_table.fork()
+        if is_imported:
+            num_blocks = math.ceil(seq.get_len() / self.block_size)
+            block_table = BlockTable(
+                block_size=self.block_size,
+                block_allocator=self.block_allocator,
+                max_block_sliding_window=self.max_block_sliding_window,
+            )
+            allocated_blocks = []
+            prev_block = None
+            for _ in range(num_blocks):
+                new_block = self.block_allocator.allocate_mutable_block(
+                    prev_block=prev_block,
+                    device=Device.GPU,
+                    extra_hash=None
+                )
+                if new_block is None:
+                    raise MemoryError(f"Failed to allocate block for imported seq {seq.seq_id}")
+                allocated_blocks.append(new_block)
+                prev_block = new_block
+            block_table.update(allocated_blocks)
+            self.block_tables[seq.seq_id] = block_table
+            self._last_access_blocks_tracker.add_seq(seq.seq_id)
+            
+            for seq in waiting_seqs[1:]:
+                self.block_tables[seq.seq_id] = block_table.fork()
+                self._last_access_blocks_tracker.add_seq(seq.seq_id)
+        else:
+            block_table: BlockTable = self._allocate_sequence(seq)
+            self.block_tables[seq.seq_id] = block_table
 
             # Track seq
             self._last_access_blocks_tracker.add_seq(seq.seq_id)
 
-        # Allocate cross-attention block table for encoder sequence
-        #
-        # NOTE: Here we assume that all sequences in the group have the same
-        # encoder prompt.
-        request_id = seq_group.request_id
+            # Assign the block table for each sequence.
+            for seq in waiting_seqs[1:]:
+                self.block_tables[seq.seq_id] = block_table.fork()
 
-        assert (request_id
-                not in self.cross_block_tables), \
-            "block table already exists"
+                # Track seq
+                self._last_access_blocks_tracker.add_seq(seq.seq_id)
 
-        check_no_caching_or_swa_for_blockmgr_encdec(self, seq_group)
+            # Allocate cross-attention block table for encoder sequence
+            #
+            # NOTE: Here we assume that all sequences in the group have the same
+            # encoder prompt.
+            request_id = seq_group.request_id
 
-        if seq_group.is_encoder_decoder():
-            encoder_seq = seq_group.get_encoder_seq()
-            assert encoder_seq is not None
-            block_table = self._allocate_sequence(encoder_seq)
-            self.cross_block_tables[request_id] = block_table
+            assert (request_id
+                    not in self.cross_block_tables), \
+                "block table already exists"
+
+            check_no_caching_or_swa_for_blockmgr_encdec(self, seq_group)
+
+            if seq_group.is_encoder_decoder():
+                encoder_seq = seq_group.get_encoder_seq()
+                assert encoder_seq is not None
+                block_table = self._allocate_sequence(encoder_seq)
+                self.cross_block_tables[request_id] = block_table
 
     def can_append_slots(self, seq_group: SequenceGroup,
                          num_lookahead_slots: int) -> bool:
