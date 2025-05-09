@@ -925,6 +925,7 @@ class LLMEngine:
             >>> # abort the request
             >>> engine.abort_request(request_id)
         """
+        print("ABORTING REQUEST")
         for scheduler in self.scheduler:
             scheduler.abort_seq_group(
                 request_id, seq_id_to_seq_group=self.seq_id_to_seq_group)
@@ -1159,9 +1160,6 @@ class LLMEngine:
 
             if seq_group.is_finished():
                 finished_now.append(i)
-                if seq_group.waiting_for_decode_trigger:
-                    for scheduler in self.scheduler:
-                        scheduler.add_to_suspend(seq_group)
 
         # Generate outputs for the requests that finished this iteration
         for i in finished_now:
@@ -1177,6 +1175,7 @@ class LLMEngine:
                 use_cache=self.use_cached_outputs)
             if request_output:
                 ctx.request_outputs.append(request_output)
+
 
         # When we process a single request, we skip it for the next time,
         # and invoke the request output callback (if there was final output)
@@ -1402,7 +1401,7 @@ class LLMEngine:
             for finished_request_id in finished_requests_ids:
                 if finished_request_id in self.seq_id_to_seq_group:
                     del self.seq_id_to_seq_group[finished_request_id]
-
+            
             # Maybe switch from async mode to sync mode
             if not allow_async_output_proc and len(ctx.output_queue) > 0:
                 self._process_model_outputs(ctx=ctx)
@@ -2180,23 +2179,23 @@ class LLMEngine:
                                                   kwargs)
 
     def run_first_add_chunk(self, request_id: str, prompt: str):
-        self.add_request(request_id, prompt, params=SamplingParams(max_tokens=0), waiting_for_decode_trigger=True)
+        print("run_first_add_chunk")
+        self.add_request(request_id, prompt, params=SamplingParams(max_tokens=1), waiting_for_decode_trigger=True)
     
     def run_decode(self, request_id: str):
-        scheduler = self.llm_engine.scheduler[0]
-        if not scheduler.run_decode(request_id):
-            raise ValueError(f"Request {request_id} not found in scheduler")
+        print("run_decode")
+        scheduler = self.scheduler[0]
+        scheduler.run_decode(request_id)
         
-    def run_add_chunk(self, request_id:str, prompt: str):
-        scheduler = self.llm_engine.scheduler[0]
+    def run_add_chunk(self, request_id: str, prompt: str):
+        print("run_add_chunk")
+        scheduler = self.scheduler[0]
         prompt_tokens = self.tokenizer.encode(prompt)
-        if not scheduler.run_add_chunk(request_id, prompt_tokens):
-            raise ValueError(f"Request {request_id} not found in scheduler")
+        scheduler.run_add_chunk(request_id, prompt_tokens)
         
     def run_export(self, request_id:str):
-        scheduler = self.llm_engine.scheduler[0]
-        if not scheduler.run_export(request_id):
-            raise ValueError(f"Request {request_id} not found in scheduler")
+        scheduler = self.scheduler[0]
+        scheduler.run_export(request_id)
     
     def initiate_kv_export(self, request_id: str) -> Optional[bytes]:
         """Exports the state of a sequence group, including KV cache, for transfer.
@@ -2300,6 +2299,7 @@ class LLMEngine:
             if pickled_seq_group is None:
                 raise KeyError("'metadata' not found in payload.")
             seq_group: SequenceGroup = pickle.loads(pickled_seq_group)
+            seq_group.is_imported = True
 
             # Keep the serialized KV tensor payload for later processing
             kv_cache_seq_group = payload.get('kv_cache')

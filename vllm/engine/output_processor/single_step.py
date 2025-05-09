@@ -131,6 +131,6 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
             sampling_params,
             lora_req=seq_group.lora_request,
         )
-        if seq.is_finished():
+        if seq.is_finished() and not seq_group.waiting_for_decode_trigger:
             for scheduler in self.scheduler:
                 scheduler.free_seq(seq)

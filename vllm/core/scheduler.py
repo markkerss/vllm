@@ -682,6 +682,7 @@ class Scheduler:
         Returns:
             SchedulerRunningOutputs.
         """
+        print("SCHEDULING RUNNING")
         ret: SchedulerRunningOutputs = self._scheduler_running_outputs_cache[
             self.cache_id].get_object()
         ret.blocks_to_swap_out.clear()
@@ -711,6 +712,10 @@ class Scheduler:
         assert len(self._async_stopped) == 0
         while running_queue:
             seq_group = running_queue[0]
+            if seq_group.request_id == "1":
+              print(seq_group.seqs[0].data._prompt_token_ids)
+              for seq in seq_group.seqs:
+                print("SEQ ID", seq.seq_id)
             # We discard the cached tokens info here because we don't need it
             # for running sequence:
             #   1. If a sequence is running with chunked prefill, the cached
@@ -730,6 +735,7 @@ class Scheduler:
             num_running_tokens = num_uncached_new_tokens
             if num_running_tokens == 0:
                 # No budget => Stop
+                print("NO BUDGET")
                 break
 
             running_queue.popleft()
@@ -746,6 +752,7 @@ class Scheduler:
             # NOTE(woosuk): Preemption happens only when there is no available
             # slot to keep all the sequence groups in the RUNNING state.
             while not self._can_append_slots(seq_group, enable_chunking):
+                print("CAN'T APPEND SLOTS")
                 budget.subtract_num_batched_tokens(seq_group.request_id,
                                                    num_running_tokens)
                 num_running_seqs = seq_group.get_max_num_running_seqs()
@@ -797,6 +804,7 @@ class Scheduler:
             else:
                 self._append_slots(seq_group, blocks_to_copy, enable_chunking)
                 is_prefill = seq_group.is_prefill()
+                print("SEQUENCE IS PREFILL", is_prefill)
 
                 scheduled_seq_group: ScheduledSequenceGroup = (
                     self._scheduled_seq_group_cache[
@@ -806,6 +814,7 @@ class Scheduler:
                     scheduled_seq_group.token_chunk_size = num_running_tokens
                     prefill_seq_groups.append(scheduled_seq_group)
                     ret.prefill_seq_groups_list.append(seq_group)
+                    print("SCHEDULING PREFILL")
                 else:
                     scheduled_seq_group.token_chunk_size = 1
                     decode_seq_groups.append(scheduled_seq_group)
@@ -822,10 +831,11 @@ class Scheduler:
                     budget.add_num_seqs(seq_group.request_id, num_running_seqs)
                 if curr_loras is not None and seq_group.lora_int_id > 0:
                     curr_loras.add(seq_group.lora_int_id)
-            if seq_group.is_finished():
-                if seq_group.waiting_for_decode_trigger:
-                    self.suspended[seq_group.request_id] = seq_group
-
+            # if seq_group.is_finished():
+            #     if seq_group.waiting_for_decode_trigger:
+            #       self.suspended[seq_group.request_id] = seq_group
+            #       print("SUSPENDED THE GROUP")
+        print("SCHEDULING RUNNING DONE")
         self._scheduler_running_outputs_cache[self.next_cache_id].reset()
         self._scheduled_seq_group_cache[self.next_cache_id].reset()
 
@@ -1092,9 +1102,7 @@ class Scheduler:
             seq_group = waiting_queue[0]
 
             waiting_seqs = seq_group.get_seqs(status=SequenceStatus.WAITING)
-            waiting_seq_ids = {s.seq_id for s in waiting_seqs}
-            has_allocated_table = any(seq_id in self.block_manager.block_tables for seq_id in waiting_seq_ids)
-            is_imported = (not has_allocated_table) and any(s.get_len() > 0 for s in waiting_seqs)
+            is_imported = seq_group.is_imported
 
             if is_imported:
                 can_allocate = self.block_manager.can_allocate(seq_group, num_lookahead_slots=0)
@@ -1140,7 +1148,7 @@ class Scheduler:
                 budget.add_num_seqs(seq_group.request_id, num_new_seqs)
                 seq_groups.append(ScheduledSequenceGroup(seq_group=seq_group, token_chunk_size=0))
                 continue
-            
+            print("SCHEDULING NOT IMPORTED")
             assert len(waiting_seqs) == 1, (
                 "Waiting sequence group should have only one prompt "
                 "sequence.")
@@ -1233,6 +1241,7 @@ class Scheduler:
                 curr_loras.add(lora_int_id)
             waiting_queue.popleft()
             self._allocate_and_set_running(seq_group)
+            print("ALLOCATED AND SET RUNNING")
 
             if partial_prefill_metadata is not None:
                 partial_prefill_metadata.maybe_increment_partial_prefills(
@@ -1265,6 +1274,7 @@ class Scheduler:
                 num_cached_tokens=num_new_tokens_cached,
             )
             budget.add_num_seqs(seq_group.request_id, num_new_seqs)
+            print("SCEDULING THE GROUP")
 
         # Queue requests that couldn't be scheduled.
         waiting_queue.extendleft(leftover_waiting_sequences)
@@ -1303,22 +1313,6 @@ class Scheduler:
         prefills = SchedulerPrefillOutputs.create_empty()
         running_scheduled = SchedulerRunningOutputs.create_empty()
         swapped_in = SchedulerSwappedInOutputs.create_empty()
-
-        for seq_group_id, seq_group in self.suspended.items():
-          if seq_group.pending_action == PendingAction.DECODE:
-            seq_group.state = SequenceStage.DECODE
-            seq_group.waiting_for_decode_trigger = False
-            seq_group.sampling_params.max_tokens = 4096
-          elif seq_group.pending_action == PendingAction.ADD_CHUNK:
-            prompt_tokens = self.add_chunk_requests[seq_group_id]
-            for prompt_token in prompt_tokens:
-              for seq in seq_group.seqs:
-                seq.data.extend(prompt_token)
-            seq_group.state = SequenceStage.PREFILL
-          # elif seq_group.pending_action == PendingAction.EXPORT:
-          #     self.run_export(seq_group_id)
-          seq_group.pending_action = None
-          del self.suspended[seq_group_id]
 
         # If any requests are swapped, prioritized swapped requests.
         if not self.swapped:
@@ -1532,6 +1526,35 @@ class Scheduler:
 
     def _schedule(self) -> SchedulerOutputs:
         """Schedule queued requests."""
+        to_delete = []
+        for seq_group_id, seq_group in self.suspended.items():
+          if seq_group.pending_action == PendingAction.DECODE:
+            for seq in seq_group.seqs:
+                seq.status = SequenceStatus.RUNNING
+            seq_group.state = SequenceStage.DECODE
+            seq_group.waiting_for_decode_trigger = False
+            seq_group.sampling_params.max_tokens = 4096
+            to_delete.append(seq_group_id)
+            self.running.append(seq_group)
+          elif seq_group.pending_action == PendingAction.ADD_CHUNK:
+            to_delete.append(seq_group_id)
+            prompt_tokens = self.add_chunk_requests[seq_group_id]
+            for prompt_token in prompt_tokens:
+              for seq in seq_group.seqs:
+                print("CURRENT SEQ ID", seq.seq_id)
+                seq.data._prompt_token_ids.extend(prompt_token)
+                seq.status = SequenceStatus.RUNNING
+                seq.data._stage = SequenceStage.PREFILL
+                print("COMPUTED TOKENS:", seq.get_num_computed_tokens(), "\nOUTPUT LEN:", seq.get_output_len(), "\nLEN:", seq.get_len(), "\nPROMPT LEN:", seq.get_prompt_len())
+            seq_group.state = SequenceStage.PREFILL
+            self.running.append(seq_group)
+          # elif seq_group.pending_action == PendingAction.EXPORT:
+          #     self.run_export(seq_group_id)
+          seq_group.pending_action = None
+        
+        for seq_group_id in to_delete:
+          del self.suspended[seq_group_id]
+
         if self.scheduler_config.chunked_prefill_enabled:
             return self._schedule_chunked_prefill()
         else:
@@ -1732,16 +1755,33 @@ class Scheduler:
 
     def free_seq(self, seq: Sequence) -> None:
         """Free a sequence from a block table."""
+        print("FREEING SEQ", seq.seq_id)
         self.block_manager.free(seq)
 
     def _free_finished_seqs(self, seq_group: SequenceGroup) -> None:
         """Free finished seqs in a sequence group."""
+        print("NOT HERE!!!!!!",  "free_finished_seqs")
         for seq in seq_group.get_seqs():
             if seq.is_finished():
                 self.free_seq(seq)
 
     def _free_finished_seq_group(self, seq_group: SequenceGroup) -> None:
-        if seq_group.is_finished():
+        if seq_group.waiting_for_decode_trigger:
+          self.suspended[seq_group.request_id] = seq_group
+          seq = seq_group.first_seq
+          print("COMPUTED TOKENS:", seq.get_num_computed_tokens(), "\nOUTPUT LEN:", seq.get_output_len(), "\nLEN:", seq.get_len(), "\nPROMPT LEN:", seq.get_prompt_len())
+          seq.data._output_token_ids = []
+          print("COMPUTED TOKENS:", seq.get_num_computed_tokens(), "\nOUTPUT LEN:", seq.get_output_len(), "\nLEN:", seq.get_len(), "\nPROMPT LEN:", seq.get_prompt_len())
+          print(self.suspended, seq_group.request_id)
+          print("SUSPENDED THE GROUP!!!")
+          for seq in seq_group.get_seqs():
+            if seq.seq_id in self.block_manager.block_tables:
+              print("SEQ ID", seq.seq_id)
+            else:
+              print("NOT HERE!!!!!!",  "BLOCK ID NOT FOUND")
+        else:
+          print("NOT HERE!!!!!!",  "free_finished_seq_group")
+          if seq_group.is_finished():
             # Free cross-attention block table, if it exists
             self._free_seq_group_cross_attn_blocks(seq_group)
 
@@ -1750,8 +1790,9 @@ class Scheduler:
             # next step.
             self._finished_requests_ids.append(seq_group.request_id)
 
-        # Free finished seqs
-        self._free_finished_seqs(seq_group)
+          # Free finished seqs
+          self._free_finished_seqs(seq_group)
+        
 
     def free_finished_seq_groups(self) -> None:
         remaining: Deque[SequenceGroup] = deque()
@@ -1996,6 +2037,7 @@ class Scheduler:
         num_uncached_new_tokens = 0
 
         seqs = seq_group.get_seqs(status=status)
+        
         # Compute the number of new uncached and cached tokens for
         # each sequence.
         for seq in seqs:
@@ -2003,10 +2045,12 @@ class Scheduler:
                 # Decode sequences should always just have 1 uncached token
                 # TODO(rickyx): Actually is this still correct for multi-step?
                 num_uncached_new_tokens += 1
+                print("UNCACHED NEW TOKENS", num_uncached_new_tokens)
                 continue
 
             num_computed_tokens_seq = seq.get_num_computed_tokens()
             all_num_new_tokens_seq = seq.get_len() - num_computed_tokens_seq
+            print("New tokens to schedule", all_num_new_tokens_seq)
             if not self.cache_config.enable_prefix_caching:
                 # If prefix caching is not enabled, all new tokens are uncached.
                 num_uncached_new_tokens += all_num_new_tokens_seq
@@ -2018,7 +2062,7 @@ class Scheduler:
             # guaranteed to be allocated later if the sequence can be allocated.
             num_cached_tokens_seq = self.block_manager.get_num_cached_tokens(
                 seq)
-
+            print("Cached tokens", num_cached_tokens_seq)
             # Sanity check.
             if num_cached_tokens_seq < num_computed_tokens_seq:
                 # This should only happen with chunked prefill, and
@@ -2147,12 +2191,16 @@ class Scheduler:
         return None
     
     def run_decode(self, request_id: str):
+      print(request_id)
+      print(self.suspended)
       if request_id not in self.suspended:
         raise ValueError(f"Request {request_id} not found in suspended")
       seq_group = self.suspended[request_id]
       seq_group.pending_action = PendingAction.DECODE
 
     def run_add_chunk(self, request_id: str, prompt_tokens: List[int]):
+      print(request_id)
+      print(self.suspended)
       if request_id not in self.suspended:
         raise ValueError(f"Request {request_id} not found in suspended")
       seq_group = self.suspended[request_id]
@@ -2160,8 +2208,12 @@ class Scheduler:
       self.add_chunk_requests[request_id].append(prompt_tokens)
     
     def run_export(self, request_id: str):
+      print(request_id)
+      print(self.suspended)
       if request_id not in self.suspended:
         raise ValueError(f"Request {request_id} not found in suspended")
       seq_group = self.suspended[request_id]
       seq_group.pending_action = PendingAction.EXPORT
+      
+      
       

@@ -511,8 +511,17 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             context_len = seq_data.get_num_computed_tokens()
 
         # Compute tokens.
+        print(context_len, seq_len, seq_data.get_token_ids())
         tokens = seq_data.get_token_ids()[context_len:seq_len]
         token_types = seq_group_metadata.token_type_ids
+
+        # <<< START DEBUG PRINT >>>
+        if seq_group_metadata.request_id == "1" and inter_data.is_prompt: # "1" is your request_id from logs
+            print(f"DEBUG: _compute_lens for req_id {seq_group_metadata.request_id}, seq_id {inter_data.seq_ids[seq_idx]}")
+            print(f"  context_len: {context_len}, seq_len (for step): {seq_len}, token_chunk_size: {token_chunk_size}")
+            print(f"  Calculated tokens for this step: {tokens} (len: {len(tokens)})")
+            print(f"  Calculated positions for this step: list(range({context_len}, {seq_len})) (len: {seq_len - context_len})")
+        # <<< END DEBUG PRINT >>>
 
         inter_data.seq_lens[seq_idx] = seq_len
         inter_data.orig_seq_lens[seq_idx] = seq_len
@@ -893,6 +902,40 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         # Tokens and positions.
         if cuda_graph_pad_size:
             input_tokens.extend(itertools.repeat(0, cuda_graph_pad_size))
+        
+        # <<< START DEBUG PRINT 1 >>>
+        # Check which part of the flattened `input_tokens` and `input_positions` 
+        # correspond to your request "1". You'll need to know its order in the batch.
+        # This is a bit tricky without knowing the full batch structure at this point.
+        # For a start, let's print the total length if your request is in the batch.
+        is_request_1_present = any(data.request_id == "1" for data in self.inter_data_list)
+        if is_request_1_present:
+            print(f"DEBUG: build() - Before tensor conversion for req_id 1 (present in batch):")
+            # Find the specific inter_data for request "1" to estimate its segment
+            # This assumes request_id "1" is unique and maps to one inter_data entry
+            # and that inter_data_list maintains order.
+            current_offset_tokens = 0
+            current_offset_positions = 0
+            for idx, inter_data_item in enumerate(self.inter_data_list):
+                num_tokens_in_item_sequences = sum(len(s_tokens) for s_tokens in inter_data_item.input_tokens)
+                num_positions_in_item_sequences = sum(len(s_pos) for s_pos in inter_data_item.input_positions)
+
+                if inter_data_item.request_id == "1":
+                    print(f"  Req '1' (inter_data_list index {idx}):")
+                    print(f"    Number of sequences in this group: {inter_data_item.n_seqs}")
+                    for seq_i in range(inter_data_item.n_seqs): # Iterate through sequences in the group
+                        seq_input_tokens = inter_data_item.input_tokens[seq_i]
+                        seq_input_positions = inter_data_item.input_positions[seq_i]
+                        print(f"      Seq {seq_i}: input_tokens in list: {seq_input_tokens} (len: {len(seq_input_tokens)})")
+                        print(f"      Seq {seq_i}: input_positions in list: {seq_input_positions} (len: {len(seq_input_positions)})")
+                        # This shows the segment within the *flattened* batch list
+                        print(f"      Seq {seq_i}: Expected segment in FLAT input_tokens: offset {current_offset_tokens}, len {len(seq_input_tokens)}")
+                        print(f"      Seq {seq_i}: Expected segment in FLAT input_positions: offset {current_offset_positions}, len {len(seq_input_positions)}")
+                current_offset_tokens += num_tokens_in_item_sequences
+                current_offset_positions += num_positions_in_item_sequences
+            print(f"  Total flattened input_tokens (pre-padding): {input_tokens} (len: {len(input_tokens)})")
+        # <<< END DEBUG PRINT 1 >>>
+
         assert self.runner.device is not None
         input_tokens_tensor = async_tensor_h2d(input_tokens, torch.long,
                                                self.runner.device,

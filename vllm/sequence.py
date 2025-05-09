@@ -703,6 +703,7 @@ class SequenceGroup:
         self.cached_request_output = None
         self.waiting_for_decode_trigger = waiting_for_decode_trigger
         self.pending_action = None
+        self.is_imported = False
 
     @property
     def prompt(self) -> Optional[str]:
