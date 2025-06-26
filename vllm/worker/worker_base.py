@@ -215,7 +215,7 @@ class WorkerInput:
     """
 
     num_seq_groups: Optional[int] = None
-    blocks_to_swap_in: Optional[torch.Tensor] = None
+    blocks_to_swap_in: Optional[torch.Tensor]    = None
     blocks_to_swap_out: Optional[torch.Tensor] = None
     blocks_to_copy: Optional[torch.Tensor] = None
     virtual_engine: int = 0

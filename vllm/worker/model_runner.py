@@ -494,8 +494,12 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         """Compute context length, sequence length and tokens
         for the given sequence data.
         """
+        print("MAX TOKENS", seq_group_metadata.sampling_params.max_tokens)
+        for k, v in seq_group_metadata.seq_data.items():
+            print("SEQ DATA INSIDE COMPUTE LENS", k, v.get_prompt_token_ids())
         seq_data = seq_group_metadata.seq_data[inter_data.seq_ids[seq_idx]]
         token_chunk_size = seq_group_metadata.token_chunk_size
+        print("TOKEN CHUNK SIZE", token_chunk_size)
 
         # Compute context length (the number of tokens that are
         # already computed) and sequence length (total number of tokens).
@@ -511,7 +515,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             context_len = seq_data.get_num_computed_tokens()
 
         # Compute tokens.
-        print(context_len, seq_len, seq_data.get_token_ids())
+        print("SEQ_DATA INSIDE WORKER", context_len, seq_len, seq_data.get_token_ids())
         tokens = seq_data.get_token_ids()[context_len:seq_len]
         token_types = seq_group_metadata.token_type_ids
 
@@ -1257,12 +1261,23 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
         If cuda graph is required, this API automatically pads inputs.
         """
-        self.builder.prepare(finished_requests_ids)
+        self.builder.prepare(
+            finished_requests_ids=finished_requests_ids)
+
+        logger.info("Preparing model input tensors. seq_group_metadata_list: %s",
+                    seq_group_metadata_list)
         for seq_group_metadata in seq_group_metadata_list:
+            logger.info(
+                f"Processing seq group {seq_group_metadata.request_id}, "
+                f"is_prompt={seq_group_metadata.is_prompt}, "
+                f"multi_modal_data={seq_group_metadata.multi_modal_data is not None}"
+            )
             try:
                 self.builder.add_seq_group(seq_group_metadata)
             except Exception as e:
-                # Raise an exception that tracks the ID of the bad request
+                logger.error(
+                    f"Error processing seq group {seq_group_metadata.request_id}",
+                    exc_info=e)
                 raise InputProcessingError(seq_group_metadata.request_id,
                                            str(e)) from e
 
@@ -1733,7 +1748,6 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
     ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
         if num_steps > 1:
             raise ValueError("num_steps > 1 is not supported in ModelRunner")
-
         if self.lora_config:
             assert model_input.lora_requests is not None
             assert model_input.lora_mapping is not None

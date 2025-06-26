@@ -65,6 +65,8 @@ from vllm.worker.model_runner_base import InputProcessingError
 # from vllm.worker.worker import Worker # Assuming Worker class is needed for RPC calls
 import pickle
 from vllm.core.block.block_table import BlockTable # Add if not present
+import logging
+import traceback
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
@@ -918,14 +920,14 @@ class LLMEngine:
             - Refer to the
               :meth:`~vllm.core.scheduler.Scheduler.abort_seq_group`
               from class :class:`~vllm.core.scheduler.Scheduler`.
-
         Example:
             >>> # initialize engine and add a request with request_id
             >>> request_id = str(0)
             >>> # abort the request
             >>> engine.abort_request(request_id)
         """
-        print("ABORTING REQUEST")
+        logger.info(f"Aborting request {request_id}")
+        traceback.print_stack()
         for scheduler in self.scheduler:
             scheduler.abort_seq_group(
                 request_id, seq_id_to_seq_group=self.seq_id_to_seq_group)
@@ -1427,6 +1429,10 @@ class LLMEngine:
             # will cause one virtual engine's microbatch to block the pipeline.
             last_sampled_token_ids = \
                 self._get_last_sampled_token_ids(virtual_engine)
+            
+            for seq_group_metadata in seq_group_metadata_list:
+                for k, v in seq_group_metadata.seq_data.items():
+                    print("SEQ_DATA INSIDE ENGINE TO SEND", k, v.get_prompt_token_ids())
 
             execute_model_req = ExecuteModelRequest(
                 seq_group_metadata_list=seq_group_metadata_list,
@@ -2184,10 +2190,10 @@ class LLMEngine:
     
     def run_decode(self, request_id: str):
         print("run_decode")
-        scheduler = self.scheduler[0]
-        scheduler.run_decode(request_id)
-        
+        self.scheduler[0].run_decode(request_id)
+    
     def run_add_chunk(self, request_id: str, prompt: str):
+        # Find the sequence group with the given request ID.
         print("run_add_chunk")
         scheduler = self.scheduler[0]
         prompt_tokens = self.tokenizer.encode(prompt)

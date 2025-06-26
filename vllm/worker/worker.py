@@ -355,7 +355,10 @@ class Worker(LocalOrDistributedWorkerBase):
             self, execute_model_req: ExecuteModelRequest) -> WorkerInput:
         virtual_engine = execute_model_req.virtual_engine
         num_steps = execute_model_req.num_steps
-        num_seq_groups = len(execute_model_req.seq_group_metadata_list)
+        num_seq_groups = len(execute_model_req.seq_group_metadata_list) 
+        for seq_group_metadata in execute_model_req.seq_group_metadata_list:
+            for k, v in seq_group_metadata.seq_data.items():
+                print("SEQ DATA PREPARE WORKER INPUT", k, v.get_prompt_token_ids())
         # `blocks_to_swap_in` and `blocks_to_swap_out` are cpu tensors.
         # they contain parameters to launch cudamemcpyasync.
         blocks_to_swap_in = torch.tensor(execute_model_req.blocks_to_swap_in,
@@ -408,11 +411,13 @@ class Worker(LocalOrDistributedWorkerBase):
         the data payload size. The function also cleans up cache based on
         a given `finished_request_ids`.
         """
+        print("GET CACHED SEQ GROUP METADATA")
         new_seq_group_metadata_list = []
         for metadata_or_delta in seq_group_metadata_list:
             request_id = metadata_or_delta.request_id
             if request_id not in self._seq_group_metadata_cache:
                 # The first prefill.
+                print("SEQ ID NOT IN CACHE", request_id)
                 assert isinstance(metadata_or_delta, SequenceGroupMetadata)
                 self._seq_group_metadata_cache[request_id] = metadata_or_delta
             else:
@@ -420,10 +425,13 @@ class Worker(LocalOrDistributedWorkerBase):
                 if isinstance(metadata_or_delta, SequenceGroupMetadataDelta):
                     self._seq_group_metadata_cache[request_id].apply_delta(
                         metadata_or_delta)
+                    print("APPLIED DELTA TO SEQ ID", request_id)
+                    print("PROMPT TOKENS", self._seq_group_metadata_cache[request_id].get_prompt_token_ids(), "OUTPUT TOKENS", self._seq_group_metadata_cache[request_id].get_output_token_ids())
                 else:
                     # If metadata snapshot is sent again, it is
                     # preempted. Reset the cache because we need to start
                     # from scratch.
+                    print("RESET CACHE FOR SEQ ID", request_id)
                     assert isinstance(metadata_or_delta, SequenceGroupMetadata)
                     self._seq_group_metadata_cache[
                         request_id] = metadata_or_delta
@@ -442,6 +450,7 @@ class Worker(LocalOrDistributedWorkerBase):
         execute_model_req: ExecuteModelRequest,
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Optional[List[SamplerOutput]]:
+        print("EXECUTING MODEL SPMD")
         if execute_model_req is not None:
             new_seq_group_metadata_list = self._get_cached_seq_group_metadata(
                 execute_model_req.seq_group_metadata_list,
@@ -449,6 +458,7 @@ class Worker(LocalOrDistributedWorkerBase):
 
             execute_model_req.seq_group_metadata_list = (
                 new_seq_group_metadata_list)
+        
         output = super()._execute_model_spmd(execute_model_req,
                                              intermediate_tensors)
         return output

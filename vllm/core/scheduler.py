@@ -682,7 +682,7 @@ class Scheduler:
         Returns:
             SchedulerRunningOutputs.
         """
-        print("SCHEDULING RUNNING")
+        # print("SCHEDULING RUNNING")
         ret: SchedulerRunningOutputs = self._scheduler_running_outputs_cache[
             self.cache_id].get_object()
         ret.blocks_to_swap_out.clear()
@@ -713,7 +713,7 @@ class Scheduler:
         while running_queue:
             seq_group = running_queue[0]
             if seq_group.request_id == "1":
-              print(seq_group.seqs[0].data._prompt_token_ids)
+              print("APPENDED NEW TOKENS", seq_group.seqs[0].data._prompt_token_ids)
               for seq in seq_group.seqs:
                 print("SEQ ID", seq.seq_id)
             # We discard the cached tokens info here because we don't need it
@@ -809,10 +809,28 @@ class Scheduler:
                 scheduled_seq_group: ScheduledSequenceGroup = (
                     self._scheduled_seq_group_cache[
                         self.cache_id].get_object())
+                for seq in seq_group.seqs:
+                    print(seq.data.prompt_token_ids)
+
+                print(seq_group.seqs_dict[0].data.prompt_token_ids)
+                for seq in seq_group.seqs_dict.values():
+                    print(seq.data.prompt_token_ids)
+
                 scheduled_seq_group.seq_group = seq_group
                 if is_prefill:
                     scheduled_seq_group.token_chunk_size = num_running_tokens
+                    for seq_group in prefill_seq_groups:
+                        for seq in seq_group.seq_group.get_seqs():
+                            print("PREFILL SEQ GROUP BEFORE",seq.data.prompt_token_ids)
+                    print("CHECKING SCHEDULED SEQ GROUP CONTENTS", scheduled_seq_group.seq_group.seqs_dict[0].data._prompt_token_ids)
+                    for seq in scheduled_seq_group.seq_group.get_seqs():
+                        print("SCHEDULED SEQ GROUP CONTENTS", seq.data.prompt_token_ids)
                     prefill_seq_groups.append(scheduled_seq_group)
+                    # for seq_group in prefill_seq_groups:
+                    #     print("PREFILL SEQ GROUP LIST", seq_group.seq_group.seqs_dict[0].data._prompt_token_ids)
+                    #     for seq in seq_group.seq_group.get_seqs():
+                    #         print("PREFILL SEQ GROUP AFTER",seq.data.prompt_token_ids)
+
                     ret.prefill_seq_groups_list.append(seq_group)
                     print("SCHEDULING PREFILL")
                 else:
@@ -835,10 +853,13 @@ class Scheduler:
             #     if seq_group.waiting_for_decode_trigger:
             #       self.suspended[seq_group.request_id] = seq_group
             #       print("SUSPENDED THE GROUP")
-        print("SCHEDULING RUNNING DONE")
         self._scheduler_running_outputs_cache[self.next_cache_id].reset()
         self._scheduled_seq_group_cache[self.next_cache_id].reset()
-
+        
+        for seq_group in prefill_seq_groups:
+            for seq in seq_group.seq_group.get_seqs():
+                print("RUNNING GROUP PREFILLS BEFORE RETURN",seq.data.prompt_token_ids)
+        ret.prefill_seq_groups = prefill_seq_groups
         return ret
 
     def _schedule_swapped(
@@ -1471,6 +1492,8 @@ class Scheduler:
         self.running.extend(
             self._order_finishing_prefills_first(
                 running_scheduled.prefill_seq_groups))
+        for seq_group in running_scheduled.prefill_seq_groups:
+            print("RUNNING GROUP PREFILLS",seq_group.seq_group.first_seq.data.prompt_token_ids)
         self.running.extend([s.seq_group for s in prefills.seq_groups])
 
         # Update swapped requests.
@@ -1539,18 +1562,19 @@ class Scheduler:
           elif seq_group.pending_action == PendingAction.ADD_CHUNK:
             to_delete.append(seq_group_id)
             prompt_tokens = self.add_chunk_requests[seq_group_id]
-            for prompt_token in prompt_tokens:
-              for seq in seq_group.seqs:
-                print("CURRENT SEQ ID", seq.seq_id)
-                seq.data._prompt_token_ids.extend(prompt_token)
-                seq.status = SequenceStatus.RUNNING
-                seq.data._stage = SequenceStage.PREFILL
+            for seq in seq_group.seqs:
+                for prompt_token in prompt_tokens:
+                    print("WE ARE ADDING", prompt_token, "TO SEQ ID", seq.seq_id)
+                    seq.data.add_prompt_token_ids(prompt_token)
+                    seq.status = SequenceStatus.RUNNING
+                    seq.data._stage = SequenceStage.PREFILL
                 print("COMPUTED TOKENS:", seq.get_num_computed_tokens(), "\nOUTPUT LEN:", seq.get_output_len(), "\nLEN:", seq.get_len(), "\nPROMPT LEN:", seq.get_prompt_len())
             seq_group.state = SequenceStage.PREFILL
             self.running.append(seq_group)
           # elif seq_group.pending_action == PendingAction.EXPORT:
           #     self.run_export(seq_group_id)
           seq_group.pending_action = None
+          
         
         for seq_group_id in to_delete:
           del self.suspended[seq_group_id]
@@ -1672,6 +1696,7 @@ class Scheduler:
             # It assumes the scheduled_seq_groups is ordered by
             # prefill < decoding.
             if is_first_prefill or not self.scheduler_config.send_delta_data:
+                print("SENDING FULL METADATA", seq_group.get_seqs()[0].data.prompt_token_ids, seq_group.request_id)
                 seq_group_metadata = SequenceGroupMetadata(
                     request_id=seq_group.request_id,
                     is_prompt=is_prompt,
@@ -1770,7 +1795,7 @@ class Scheduler:
           self.suspended[seq_group.request_id] = seq_group
           seq = seq_group.first_seq
           print("COMPUTED TOKENS:", seq.get_num_computed_tokens(), "\nOUTPUT LEN:", seq.get_output_len(), "\nLEN:", seq.get_len(), "\nPROMPT LEN:", seq.get_prompt_len())
-          seq.data._output_token_ids = []
+          del seq.data._output_token_ids[:]
           print("COMPUTED TOKENS:", seq.get_num_computed_tokens(), "\nOUTPUT LEN:", seq.get_output_len(), "\nLEN:", seq.get_len(), "\nPROMPT LEN:", seq.get_prompt_len())
           print(self.suspended, seq_group.request_id)
           print("SUSPENDED THE GROUP!!!")
@@ -2199,8 +2224,8 @@ class Scheduler:
       seq_group.pending_action = PendingAction.DECODE
 
     def run_add_chunk(self, request_id: str, prompt_tokens: List[int]):
-      print(request_id)
-      print(self.suspended)
+      print("Request id",request_id)
+      print("Suspended requests", self.suspended)
       if request_id not in self.suspended:
         raise ValueError(f"Request {request_id} not found in suspended")
       seq_group = self.suspended[request_id]

@@ -2,6 +2,7 @@ import vllm
 from collections import deque
 from threading import Thread
 import time
+
 class dummy_worker:
   def __init__(self):
     self.q = deque()
@@ -14,6 +15,7 @@ class dummy_worker:
         self.output_file.flush()
 
     def start_engine():
+      write_output("Starting engine\n")
       while True:
         if len(self.q) > 0:
           command = self.q.popleft()
@@ -24,7 +26,7 @@ class dummy_worker:
           if output.finished:
             for out in output.outputs:
               write_output("GENERATED: " + out.text + "\n")
-        write_output("step\n")
+        # write_output("step\n")
     
     Thread(target=start_engine, daemon=True).start()
   
@@ -50,5 +52,9 @@ if __name__ == "__main__":
   worker.add_command(("Hello, ", "1", True, "prefill"))
   time.sleep(5)
   worker.add_command(("my name is ", "1", False, "prefill"))
+  time.sleep(5)
+  # worker.add_command(("Bob and I like to dance salsa. ", "1", False, "prefill"))
   # time.sleep(5)
-  # worker.add_command((None, "1", False, "decode"))
+  print("running queue", worker.engine.scheduler[0].running)
+  worker.add_command((None, "1", False, "decode"))
+  print("FINISHED")

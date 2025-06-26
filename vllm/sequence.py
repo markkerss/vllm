@@ -144,6 +144,8 @@ class SequenceDataDelta(
     new_num_computed_tokens: int
     # Overwriting existing `stage`.
     new_stage: SequenceStage
+    # New appended prompt token ids.
+    new_added_prompt_token_ids: list[int]
 
 
 class SequenceData(msgspec.Struct,
@@ -180,7 +182,7 @@ class SequenceData(msgspec.Struct,
     # It is used to get delta input. It is reset when `get_delta_and_reset`
     # is called.
     _new_appended_tokens: list[int] = msgspec.field(default_factory=list)
-
+    _new_added_prompt_token_ids: list[int] = msgspec.field(default_factory=list)
     # It is used to compute mrope_position_ids.
     _mrope_position_delta: Optional[int] = None
 
@@ -365,12 +367,18 @@ class SequenceData(msgspec.Struct,
     def get_output_token_ids(self) -> tuple[int, ...]:
         return self.output_token_ids
 
+    def add_prompt_token_ids(self, token_ids: list[int]):
+        self._prompt_token_ids.extend(token_ids)
+        self._prompt_token_ids_tuple = tuple(self._prompt_token_ids)
+        self._update_cached_all_tokens()
+
     def get_delta_and_reset(self) -> SequenceDataDelta:
         delta = SequenceDataDelta(self._new_appended_tokens,
                                   self._cumulative_logprob,
-                                  self.get_num_computed_tokens(), self.stage)
+                                  self.get_num_computed_tokens(), self.stage, self._new_added_prompt_token_ids)
         # Reset delta state.
         self._new_appended_tokens = []
+        self._new_added_prompt_token_ids = []
         return delta
 
     def apply_delta(self, delta: SequenceDataDelta):
@@ -379,6 +387,7 @@ class SequenceData(msgspec.Struct,
         self._stage = delta.new_stage
         self._output_token_ids.extend(delta.new_output_token_ids)
         self._cached_all_token_ids.extend(delta.new_output_token_ids)
+        self._prompt_token_ids.extend(delta.new_added_prompt_token_ids)
 
     @property
     def stage(self) -> SequenceStage:
