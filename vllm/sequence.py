@@ -331,6 +331,7 @@ class SequenceData(msgspec.Struct,
         # If all tokens are computed, it means it is in decoding phase.
         if self.get_num_uncomputed_tokens() == 0:
             self._stage = SequenceStage.DECODE
+        print("UPDATE_NUM_COMPUTED_TOKENS", self._stage, self.get_num_uncomputed_tokens())
 
     def get_num_cached_tokens(self) -> int:
         """Return the number of tokens with prefix cache hit."""

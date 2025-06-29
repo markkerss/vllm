@@ -519,12 +519,14 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         tokens = seq_data.get_token_ids()[context_len:seq_len]
         token_types = seq_group_metadata.token_type_ids
 
+        print(f"DEBUG_MODEL_RUNNER: _compute_lens preparing tokens={tokens}, positions={list(range(context_len, seq_len))}")
         # <<< START DEBUG PRINT >>>
         if seq_group_metadata.request_id == "1" and inter_data.is_prompt: # "1" is your request_id from logs
             print(f"DEBUG: _compute_lens for req_id {seq_group_metadata.request_id}, seq_id {inter_data.seq_ids[seq_idx]}")
             print(f"  context_len: {context_len}, seq_len (for step): {seq_len}, token_chunk_size: {token_chunk_size}")
             print(f"  Calculated tokens for this step: {tokens} (len: {len(tokens)})")
             print(f"  Calculated positions for this step: list(range({context_len}, {seq_len})) (len: {seq_len - context_len})")
+            print(f"  Positions: {inter_data.input_positions[0]}")
         # <<< END DEBUG PRINT >>>
 
         inter_data.seq_lens[seq_idx] = seq_len
@@ -771,6 +773,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                 per_seq_fn(inter_data, seq_idx, seq_group_metadata)
         for per_seq_group_fn in self.per_seq_group_compute_fns:
             per_seq_group_fn(inter_data, seq_group_metadata)
+        print("added seq group", seq_group_metadata.request_id)
 
     def _use_captured_graph(self,
                             batch_size: int,
@@ -848,6 +851,9 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             # prefix caching and there is no decode request.
             return self.model_input_cls()
 
+        print(f"DEBUG_MODEL_RUNNER: build() - 1. Successfully flattened Python lists.")
+        print(f"DEBUG_MODEL_RUNNER: build() - 1a. input_tokens (list): {str(input_tokens[:10])}... (len: {len(input_tokens)})")
+
         mrope_input_positions: Optional[List[List[int]]] = None
         if any(inter_data.mrope_input_positions is not None
                for inter_data in self.inter_data_list):
@@ -869,6 +875,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             for inter_data in self.inter_data_list:
                 for cur_input_positions in inter_data.input_positions:
                     input_positions.extend(cur_input_positions)
+
+        print(f"DEBUG_MODEL_RUNNER: build() - 1b. input_positions (list): {str(input_positions[:10])}... (len: {len(input_positions)})")
 
         seq_lens = []
         query_lens = []
@@ -945,6 +953,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                                                self.runner.device,
                                                self.runner.pin_memory)
 
+        print(f"DEBUG_MODEL_RUNNER: build() - 2. Successfully created input_tokens_tensor. Shape: {input_tokens_tensor.shape}")
+
         token_types_tensor = async_tensor_h2d(token_types, torch.long,
                                                self.runner.device,
                                                self.runner.pin_memory) \
@@ -964,6 +974,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                                                       torch.long,
                                                       self.runner.device,
                                                       self.runner.pin_memory)
+        print(f"DEBUG_MODEL_RUNNER: build() - 3. Successfully created input_positions_tensor. Shape: {input_positions_tensor.shape}")
         # Sequence and query lengths.
         if cuda_graph_pad_size:
             seq_lens.extend(itertools.repeat(1, cuda_graph_pad_size))
@@ -971,6 +982,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         # Attention metadata.
         attn_metadata = self.attn_metadata_builder.build(
             seq_lens, query_lens, cuda_graph_pad_size, batch_size)
+
+        print(f"DEBUG_MODEL_RUNNER: build() - 4. Successfully built attention metadata.")
 
         # LoRA data.
         lora_requests = set()
@@ -1025,6 +1038,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         ]
         multi_modal_kwargs = MultiModalKwargs.batch(multi_modal_kwargs_list)
 
+        print(f"DEBUG_MODEL_RUNNER: build() - 5. Finalizing ModelInputForGPU object.")
         return self.model_input_cls(
             input_tokens=input_tokens_tensor,
             input_positions=input_positions_tensor,
@@ -1282,7 +1296,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                                            str(e)) from e
 
         self.builder.reset_cached_inter_data()
-
+        print("builder is building")
         return self.builder.build()  # type: ignore
 
     @contextmanager

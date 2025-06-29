@@ -1796,6 +1796,7 @@ class Scheduler:
           seq = seq_group.first_seq
           print("COMPUTED TOKENS:", seq.get_num_computed_tokens(), "\nOUTPUT LEN:", seq.get_output_len(), "\nLEN:", seq.get_len(), "\nPROMPT LEN:", seq.get_prompt_len())
           del seq.data._output_token_ids[:]
+          seq.data.update_num_computed_tokens(-1)
           print("COMPUTED TOKENS:", seq.get_num_computed_tokens(), "\nOUTPUT LEN:", seq.get_output_len(), "\nLEN:", seq.get_len(), "\nPROMPT LEN:", seq.get_prompt_len())
           print(self.suspended, seq_group.request_id)
           print("SUSPENDED THE GROUP!!!")

@@ -1,6 +1,7 @@
 import vllm
 from collections import deque
 from threading import Thread
+from vllm.sampling_params import SamplingParams
 import time
 
 class dummy_worker:
@@ -42,6 +43,8 @@ class dummy_worker:
         self.engine.run_add_chunk(request_id, prompt)
     elif action == "decode":
       self.engine.run_decode(request_id)
+    elif action == "vanilla":
+      self.engine.add_request(request_id, prompt, params=SamplingParams(max_tokens=4096))
     # elif action == "export":
     #   self.engine.run_export(request_id)
 
@@ -49,12 +52,14 @@ class dummy_worker:
 
 if __name__ == "__main__":
   worker = dummy_worker()
-  worker.add_command(("Hello, ", "1", True, "prefill"))
-  time.sleep(5)
-  worker.add_command(("my name is ", "1", False, "prefill"))
-  time.sleep(5)
-  # worker.add_command(("Bob and I like to dance salsa. ", "1", False, "prefill"))
+  worker.add_command(("Hello, ", "1", True, "vanilla"))
+  # worker.add_command(("Hello, ", "1", True, "prefill"))
   # time.sleep(5)
-  print("running queue", worker.engine.scheduler[0].running)
-  worker.add_command((None, "1", False, "decode"))
-  print("FINISHED")
+  # # worker.add_command(("my name is ", "1", False, "prefill"))
+  # # time.sleep(5)
+  # # worker.add_command(("and I like to ", "1", False, "prefill"))
+  # # worker.add_command(("Bob and I liXke to dance salsa. ", "1", False, "prefill"))
+  # # time.sleep(5)
+  # # print("running queue", worker.engine.scheduler[0].running)
+  # worker.add_command((None, "1", False, "decode"))
+  # print("FINISHED")
