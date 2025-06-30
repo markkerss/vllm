@@ -812,7 +812,7 @@ class Scheduler:
                 for seq in seq_group.seqs:
                     print(seq.data.prompt_token_ids)
 
-                print(seq_group.seqs_dict[0].data.prompt_token_ids)
+                # print(seq_group.seqs_dict[0].data.prompt_token_ids)
                 for seq in seq_group.seqs_dict.values():
                     print(seq.data.prompt_token_ids)
 
@@ -1556,7 +1556,7 @@ class Scheduler:
                 seq.status = SequenceStatus.RUNNING
             seq_group.state = SequenceStage.DECODE
             seq_group.waiting_for_decode_trigger = False
-            seq_group.sampling_params.max_tokens = 4096
+            seq_group.sampling_params.max_tokens = 50
             to_delete.append(seq_group_id)
             self.running.append(seq_group)
           elif seq_group.pending_action == PendingAction.ADD_CHUNK:
