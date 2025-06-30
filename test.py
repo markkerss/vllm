@@ -107,6 +107,7 @@ def main():
     engine = initialize_engine()
     test_prompts = [
       ("To be or not to be, ", "1", True, "prefill"),
+      ("that is the ", "1", False, "prefill"),
       (None, "1", False, "decode"),
     ]
     process_requests(engine, test_prompts)
