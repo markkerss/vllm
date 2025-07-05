@@ -398,6 +398,9 @@ class Worker(LocalOrDistributedWorkerBase):
         if (worker_input.blocks_to_copy is not None
                 and worker_input.blocks_to_copy.numel() > 0):
             self.cache_engine[virtual_engine].copy(worker_input.blocks_to_copy)
+    
+    def get_block_kv_data(self, physical_block_ids: List[int], output_file: str = "output4.txt") -> bool:
+        return self.cache_engine[0].get_block_kv_data(physical_block_ids, output_file)
 
     def _get_cached_seq_group_metadata(
             self,

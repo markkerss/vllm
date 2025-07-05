@@ -75,6 +75,7 @@ _G = TypeVar("_G", bound=BaseTokenizerGroup, default=BaseTokenizerGroup)
 _O = TypeVar("_O", RequestOutput, PoolingRequestOutput)
 _R = TypeVar("_R", default=Any)
 
+print_output_txt = "chunked_output.txt"
 
 @dataclass
 class SchedulerOutputState:
@@ -1178,7 +1179,6 @@ class LLMEngine:
             if request_output:
                 ctx.request_outputs.append(request_output)
 
-
         # When we process a single request, we skip it for the next time,
         # and invoke the request output callback (if there was final output)
         if request_id:
@@ -1380,6 +1380,15 @@ class LLMEngine:
         # Clear outputs for each new scheduler iteration
         ctx.request_outputs.clear()
 
+        with open("block_ids.txt", "a") as f:
+            scheduler = self.scheduler[0]
+            seq_group = scheduler.get_sequence_group("1")
+            if seq_group is not None:
+                block_ids = scheduler.block_manager.get_block_table_gracefully(f, seq_group.first_seq)
+                if block_ids is not None:
+                    print("CALLING RPC")
+                    self.collective_rpc("get_block_kv_data", args=(block_ids, print_output_txt))
+
         # Skip the scheduler if there are any remaining steps in the seq groups.
         # This ensures that the scheduler is only called again when the current
         # batch has completed.
@@ -1400,6 +1409,7 @@ class LLMEngine:
                 virtual_engine].get_and_reset_finished_requests_ids()
             # When n>1, elements in self.seq_id_to_seq_group should be deleted
             # here, otherwise memory leaks.
+
             for finished_request_id in finished_requests_ids:
                 if finished_request_id in self.seq_id_to_seq_group:
                     del self.seq_id_to_seq_group[finished_request_id]
@@ -2368,7 +2378,6 @@ class LLMEngine:
         except Exception as e:
             logger.exception(f"Error during cleanup (abort_seq_group) for {request_id}: {e}")
             return False
-
 
 if envs.is_set("VLLM_USE_V1") and envs.VLLM_USE_V1:
     from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine

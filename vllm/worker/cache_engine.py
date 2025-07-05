@@ -8,8 +8,7 @@ from vllm.attention import get_attn_backend
 from vllm.config import CacheConfig, DeviceConfig, ModelConfig, ParallelConfig
 from vllm.logger import init_logger
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType,
-                        get_dtype_size, is_pin_memory_available)
-    
+                        get_dtype_size, is_pin_memory_available)    
 from vllm.core.block_manager import BlockTable
 
 
@@ -111,6 +110,39 @@ class CacheEngine:
         self.attn_backend.copy_blocks(self.gpu_cache, src_to_dsts)
 
     # ---- KV Cache Export/Import Methods ----
+
+    def get_block_kv_data(self, physical_block_ids: List[int], output_file: str = "kv_cache.txt") -> bool:
+        """Get KV cache data for a specific physical block and write to file."""
+        for physical_block_id in physical_block_ids:
+            try:
+                with open(output_file, "w") as f:
+                    header = f"KV_CACHE_BLOCK_{physical_block_id}"
+                    f.write(header + "\n")
+                    
+                    for layer_idx in range(self.num_attention_layers):
+                        # Direct access to GPU cache
+                        block_cache = self.gpu_cache[layer_idx][:, physical_block_id, :, :, :]
+                        
+                        if block_cache.dtype == torch.bfloat16:
+                            k_cache = block_cache[0].float().cpu().numpy()
+                            v_cache = block_cache[1].float().cpu().numpy()
+                        else:
+                            k_cache = block_cache[0].cpu().numpy()
+                            v_cache = block_cache[1].cpu().numpy()
+                        
+                        # Write raw values
+                        f.write(f"LAYER_{layer_idx}_K_SHAPE {k_cache.shape}\n")
+                        for i, row in enumerate(k_cache):
+                            f.write(f"LAYER_{layer_idx}_K_ROW_{i} {' '.join(map(str, row.flatten()))}\n")
+                        
+                        f.write(f"LAYER_{layer_idx}_V_SHAPE {v_cache.shape}\n")
+                        for i, row in enumerate(v_cache):
+                            f.write(f"LAYER_{layer_idx}_V_ROW_{i} {' '.join(map(str, row.flatten()))}\n")
+                return True
+            
+            except Exception as e:
+                f.write(f"Error accessing block {physical_block_id}: {e}")
+                return False
 
     def get_kv_cache_shape_per_block(self) -> Tuple[int, ...]:
         """Returns the shape of the KV cache for a single block for one layer."""

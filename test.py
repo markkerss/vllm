@@ -19,7 +19,10 @@ def process_requests(engine: LLMEngine,
             engine.run_add_chunk(request_id, prompt)
         elif action == "decode":
           engine.run_decode(request_id)
+        elif action == "vanilla":
+          engine.add_request(request_id, prompt, SamplingParams(max_tokens=50, temperature=0.8, top_k=5, presence_penalty=0.2))
         timeLast = time.time()
+    
 
       request_outputs: List[RequestOutput] = engine.step()
 
@@ -42,6 +45,7 @@ def main():
       ("To be or not to be, ", "1", True, "prefill"),
       ("that is the ", "1", False, "prefill"),
       (None, "1", False, "decode"),
+      # ("To be or not to be, that is the ", "1", True, "vanilla")
     ]
     process_requests(engine, test_prompts)
 

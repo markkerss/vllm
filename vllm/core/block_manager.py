@@ -309,6 +309,14 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
     def get_block_table(self, seq: Sequence) -> List[int]:
         block_ids = self.block_tables[seq.seq_id].physical_block_ids
         return block_ids  # type: ignore
+    
+    def get_block_table_gracefully(self, f, seq: Sequence) -> List[int]:
+        seq_id = seq.seq_id
+        if seq_id not in self.block_tables:
+            f.write(f"Sequence ID {seq_id} not found in block_tables\n")
+            return None
+        block_ids = self.block_tables[seq_id].physical_block_ids
+        return block_ids  # type: ignore
 
     def get_cross_block_table(self, seq_group: SequenceGroup) -> List[int]:
         request_id = seq_group.request_id
