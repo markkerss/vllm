@@ -2196,7 +2196,7 @@ class LLMEngine:
 
     def run_first_add_chunk(self, request_id: str, prompt: str):
         print("run_first_add_chunk")
-        self.add_request(request_id, prompt, params=SamplingParams(max_tokens=1, temperature=0.8, top_k=5, presence_penalty=0.2), waiting_for_decode_trigger=True)
+        self.add_request(request_id, prompt, params=SamplingParams(max_tokens=1, temperature=0, seed=42), waiting_for_decode_trigger=True)
     
     def run_decode(self, request_id: str):
         print("run_decode")

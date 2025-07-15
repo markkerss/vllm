@@ -852,6 +852,10 @@ class PrefixCachingBlock(Block):
         # physical block index.
         if self.content_hash is not None:
             self.block_id = self._allocator.promote_to_immutable_block(self)
+    
+    def remove_last_token(self) -> None:
+        self._block.remove_last_token()
+        self._update_num_tokens_total()
 
     @property
     def block_id(self) -> Optional[int]:

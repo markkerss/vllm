@@ -20,7 +20,7 @@ def process_requests(engine: LLMEngine,
         elif action == "decode":
           engine.run_decode(request_id)
         elif action == "vanilla":
-          engine.add_request(request_id, prompt, SamplingParams(max_tokens=50, temperature=0.8, top_k=5, presence_penalty=0.2))
+          engine.add_request(request_id, prompt, SamplingParams(max_tokens=50, temperature=0, seed=42))
         timeLast = time.time()
     
 

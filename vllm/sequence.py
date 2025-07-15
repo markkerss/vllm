@@ -372,6 +372,12 @@ class SequenceData(msgspec.Struct,
         self._prompt_token_ids.extend(token_ids)
         self._prompt_token_ids_tuple = tuple(self._prompt_token_ids)
         self._update_cached_all_tokens()
+    
+    def remove_all_output_tokens(self):
+        num_tokens_to_remove = len(self._output_token_ids)
+        del self._output_token_ids[:]
+        self.update_num_computed_tokens(-num_tokens_to_remove)
+        self._update_cached_all_tokens()
 
     def get_delta_and_reset(self) -> SequenceDataDelta:
         delta = SequenceDataDelta(self._new_appended_tokens,
@@ -622,6 +628,9 @@ class Sequence:
 
     def is_prefill(self) -> bool:
         return self.data.stage == SequenceStage.PREFILL
+    
+    def remove_all_output_tokens(self):
+        self.data.remove_all_output_tokens()
 
     def __repr__(self) -> str:
         return (f"Sequence(seq_id={self.seq_id}, "

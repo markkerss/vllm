@@ -406,6 +406,13 @@ class NaiveBlock(Block):
         assert len(token_ids) <= self.num_empty_slots
 
         self._token_ids.extend(token_ids)
+    
+    def remove_last_token(self) -> None:
+        self._token_ids.pop()
+
+        if self._block_id is not None:
+            self._block_id = (self._allocator.cow_block_if_not_appendable(
+                self._cow_target))
 
     @property
     def computed(self) -> bool:

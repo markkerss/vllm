@@ -260,6 +260,11 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         num_free_gpu_blocks = self.block_allocator.get_num_free_blocks(
             Device.GPU)
         return num_touched_blocks <= num_free_gpu_blocks
+    
+    def remove_last_token(self, seq: Sequence) -> None:
+        seq.remove_all_output_tokens()
+        block_table = self.block_tables[seq.seq_id]
+        block_table.remove_last_token()
 
     def append_slots(
         self,

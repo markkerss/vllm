@@ -112,6 +112,16 @@ class BlockTable:
         """
         self._blocks.update(blocks)
 
+    def remove_last_token(self) -> None:
+        assert self._is_allocated, "no blocks have been allocated"
+        assert len(self._blocks) > 0
+
+        last_token_idx = self._num_full_slots - 1
+        last_block_idx = last_token_idx // self._block_size
+
+        self._blocks.remove_last_token(last_block_idx)
+        self._num_full_slots = self._get_num_token_ids()
+
     def append_token_ids(self,
                          token_ids: List[int],
                          num_lookahead_slots: int = 0,

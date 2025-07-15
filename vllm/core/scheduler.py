@@ -1794,17 +1794,7 @@ class Scheduler:
         if seq_group.waiting_for_decode_trigger:
           self.suspended[seq_group.request_id] = seq_group
           seq = seq_group.first_seq
-          print("COMPUTED TOKENS:", seq.get_num_computed_tokens(), "\nOUTPUT LEN:", seq.get_output_len(), "\nLEN:", seq.get_len(), "\nPROMPT LEN:", seq.get_prompt_len())
-          del seq.data._output_token_ids[:]
-          seq.data.update_num_computed_tokens(-1)
-          print("COMPUTED TOKENS:", seq.get_num_computed_tokens(), "\nOUTPUT LEN:", seq.get_output_len(), "\nLEN:", seq.get_len(), "\nPROMPT LEN:", seq.get_prompt_len())
-          print(self.suspended, seq_group.request_id)
-          print("SUSPENDED THE GROUP!!!")
-          for seq in seq_group.get_seqs():
-            if seq.seq_id in self.block_manager.block_tables:
-              print("SEQ ID", seq.seq_id)
-            else:
-              print("NOT HERE!!!!!!",  "BLOCK ID NOT FOUND")
+          self.block_manager.remove_last_token(seq)
         else:
           print("NOT HERE!!!!!!",  "free_finished_seq_group")
           if seq_group.is_finished():

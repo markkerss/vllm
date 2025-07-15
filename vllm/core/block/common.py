@@ -267,6 +267,10 @@ class BlockList:
         # CoW or promotion may update the internal block_id
         if prev_block_id != block.block_id:
             self._update_block_id(block_index, block.block_id)
+        
+    def remove_last_token(self, block_index: int) -> None:
+        block = self._blocks[block_index]
+        block.remove_last_token()
 
     def append(self, new_block: Block):
         self._blocks.append(new_block)
