@@ -1176,7 +1176,8 @@ class LLMEngine:
                 seq_group,
                 self.seq_id_to_seq_group,
                 use_cache=self.use_cached_outputs)
-            if request_output:
+            if request_output and not seq_group.waiting_for_decode_trigger:
+                print("REQUEST OUTPUT 1", request_output)
                 ctx.request_outputs.append(request_output)
 
         # When we process a single request, we skip it for the next time,
@@ -1220,7 +1221,8 @@ class LLMEngine:
                 seq_group,
                 self.seq_id_to_seq_group,
                 use_cache=self.use_cached_outputs)
-            if request_output:
+            if request_output and not seq_group.waiting_for_decode_trigger:
+                print("REQUEST OUTPUT 2", request_output)
                 ctx.request_outputs.append(request_output)
 
         # For multi-step with streaming, create outputs each iteration
@@ -1242,7 +1244,8 @@ class LLMEngine:
                 self.seq_id_to_seq_group,
                 use_cache=self.use_cached_outputs,
             )
-            if request_output:
+            if request_output and not seq_group.waiting_for_decode_trigger:
+                print("REQUEST OUTPUT 3", request_output)
                 ctx.request_outputs.append(request_output)
 
         # Immediately process request outputs here (if callback is given)

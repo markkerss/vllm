@@ -1795,6 +1795,7 @@ class Scheduler:
           self.suspended[seq_group.request_id] = seq_group
           seq = seq_group.first_seq
           self.block_manager.remove_last_token(seq)
+          seq.output_text = ""
         else:
           print("NOT HERE!!!!!!",  "free_finished_seq_group")
           if seq_group.is_finished():
